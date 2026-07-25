@@ -39,6 +39,16 @@ comprueba esta tabla.
 | `chunks` | **equipo de RAG** | — |
 | `product_specs` | **equipo de RAG** | — |
 | `ingest_review_queue` | **equipo de RAG** | — |
+| `checkpoints` | plataforma / agente | **las crea LangGraph** ⚠️ |
+| `checkpoint_blobs` | plataforma / agente | **las crea LangGraph** ⚠️ |
+| `checkpoint_writes` | plataforma / agente | **las crea LangGraph** ⚠️ |
+| `checkpoint_migrations` | plataforma / agente | **las crea LangGraph** ⚠️ |
+
+⚠️ Las cuatro tablas `checkpoint*` **no están en `supabase/schema/`**: las crea
+automáticamente `langgraph-checkpoint-postgres` la primera vez que el backend
+arranca con `DATABASE_URL` definido. Son nuestras, pero las gestiona la
+librería. Aparecerán en el esquema sin que nadie las haya escrito a mano: que
+no sorprenda a nadie ni se borren por parecer basura.
 
 ### Reglas de convivencia
 

@@ -32,6 +32,17 @@ test-results/
 /data/parsed/
 *.pdf
 
+# el corpus consolidado y el seed derivado son documentación de SICK: mismo
+# estatus legal que los PDF (README §6, revisión de términos pendiente)
+/data/*.json
+sick_datasheets.json
+/supabase/seed/
+
+# python de la ingesta
+__pycache__/
+*.py[cod]
+.venv/
+
 # sistema / editor
 .DS_Store
 Thumbs.db

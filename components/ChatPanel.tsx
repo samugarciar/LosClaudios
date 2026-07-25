@@ -1,19 +1,20 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@/lib/useChat";
 import { Composer } from "@/components/Composer";
-import { STAGES, type Locale } from "@/lib/protocol";
+import { MessageBubble } from "@/components/MessageBubble";
+import { ChipGroup } from "@/components/ChipGroup";
+import { CandidateCard } from "@/components/CandidateCard";
+import { CitationDrawer } from "@/components/CitationDrawer";
+import { HandoffForm } from "@/components/HandoffForm";
+import { STAGES, type Locale, type Message } from "@/lib/protocol";
 import type { Dictionary } from "@/lib/i18n";
 
 /**
- * Contenedor del chat.
- *
- * NOTA DE ETAPA — el lote B renderiza los mensajes con marcado inline y no
- * muestra chips, candidatos ni handoff (existen en el estado, se ven en la
- * tira de diagnóstico de desarrollo). El lote C sustituye ese marcado por
- * MessageBubble / ChipGroup / CandidateCard / HandoffForm, lo que implica
- * MODIFICAR este fichero. Está anticipado, no es un cambio sorpresa.
+ * Contenedor del chat: compone el estado de `useChat` con los componentes de
+ * dominio. No contiene lógica de asesoramiento — decide únicamente disposición
+ * y qué está visible en cada momento.
  */
 
 interface ChatPanelProps {
@@ -23,14 +24,32 @@ interface ChatPanelProps {
 
 export function ChatPanel({ locale, dict }: ChatPanelProps) {
   const chat = useChat(locale);
+  const [openMarker, setOpenMarker] = useState<number | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [chat.messages, chat.streamingText]);
+  }, [chat.messages, chat.streamingText, chat.candidates, chat.handoffRequest]);
+
+  /** Marcadores con cita real: MessageBubble no debe ofrecer botones huecos. */
+  const knownMarkers = useMemo(
+    () => new Set(chat.citations.map((citation) => citation.marker)),
+    [chat.citations],
+  );
 
   const isStreaming = chat.status === "streaming";
   const isEmpty = chat.messages.length === 0 && !chat.streamingText;
+
+  /** El turno en curso se pinta como un mensaje más, sin id definitivo. */
+  const streamingMessage: Message | null = chat.streamingText
+    ? {
+        id: "streaming",
+        role: "assistant",
+        content: chat.streamingText,
+        citationMarkers: [],
+        createdAt: "",
+      }
+    : null;
 
   return (
     <section className="flex min-h-0 flex-1 flex-col gap-3">
@@ -46,31 +65,53 @@ export function ChatPanel({ locale, dict }: ChatPanelProps) {
         )}
 
         {chat.messages.map((message) => (
-          <article
+          <MessageBubble
             key={message.id}
-            className={
-              message.role === "user"
-                ? "ml-auto max-w-[85%] rounded-lg bg-accent px-3 py-2 text-sm text-accent-contrast"
-                : "max-w-[92%] rounded-lg bg-surface-sunken px-3 py-2 text-sm whitespace-pre-wrap"
-            }
-          >
-            <span className="sr-only">
-              {message.role === "user" ? dict.chat.you : dict.chat.advisor}:{" "}
-            </span>
-            {message.content}
-          </article>
+            message={message}
+            dict={dict}
+            knownMarkers={knownMarkers}
+            onOpenCitation={setOpenMarker}
+          />
         ))}
 
-        {chat.streamingText && (
-          <article className="max-w-[92%] rounded-lg bg-surface-sunken px-3 py-2 text-sm whitespace-pre-wrap">
-            <span className="sr-only">{dict.chat.advisor}: </span>
-            {chat.streamingText}
-            <span className="ml-0.5 inline-block h-4 w-[2px] animate-pulse bg-fg-muted align-middle" />
-          </article>
+        {streamingMessage && (
+          <MessageBubble
+            message={streamingMessage}
+            dict={dict}
+            knownMarkers={knownMarkers}
+            onOpenCitation={setOpenMarker}
+            streaming
+          />
         )}
 
         {isStreaming && !chat.streamingText && (
           <p className="text-sm text-fg-muted">{dict.chat.thinking}</p>
+        )}
+
+        {chat.candidates.length > 0 && (
+          <div className="space-y-2 pt-1">
+            <h2 className="text-[11px] font-semibold uppercase tracking-wide text-fg-muted">
+              {dict.candidates.title}
+            </h2>
+            {chat.candidates.map((candidate) => (
+              <CandidateCard
+                key={candidate.partNumber}
+                candidate={candidate}
+                dict={dict}
+                knownMarkers={knownMarkers}
+                onOpenCitation={setOpenMarker}
+              />
+            ))}
+          </div>
+        )}
+
+        {chat.handoffRequest && (
+          <HandoffForm
+            request={chat.handoffRequest}
+            dict={dict}
+            disabled={isStreaming}
+            onSubmit={(lead) => void chat.submitLead(lead)}
+          />
         )}
 
         <div ref={bottomRef} />
@@ -79,7 +120,7 @@ export function ChatPanel({ locale, dict }: ChatPanelProps) {
       {chat.error && (
         <div
           role="alert"
-          className="flex items-center justify-between gap-3 rounded-lg border border-warn-border bg-warn-surface px-3 py-2 text-sm text-warn-fg"
+          className="flex shrink-0 items-center justify-between gap-3 rounded-lg border border-warn-border bg-warn-surface px-3 py-2 text-sm text-warn-fg"
         >
           <span>{dict.chat.errorGeneric}</span>
           {chat.error.retryable && (
@@ -94,6 +135,12 @@ export function ChatPanel({ locale, dict }: ChatPanelProps) {
         </div>
       )}
 
+      <ChipGroup
+        chips={chat.chips}
+        disabled={isStreaming}
+        onSelect={(chip) => void chat.sendMessage(chip.value, chip.slot)}
+      />
+
       <Composer
         dict={dict}
         disabled={isStreaming}
@@ -102,15 +149,12 @@ export function ChatPanel({ locale, dict }: ChatPanelProps) {
         isStreaming={isStreaming}
       />
 
-      {process.env.NODE_ENV !== "production" && (
-        <p className="shrink-0 font-mono text-[11px] text-fg-muted">
-          {/* Tira de diagnóstico: confirma que el contrato SSE llega completo
-              antes de que existan los componentes del lote C. */}
-          dev · stage={chat.stage} · chips={chat.chips.length} · citations=
-          {chat.citations.length} · candidates={chat.candidates.length} · handoff=
-          {chat.handoffRequest ? chat.handoffRequest.reason : "—"}
-        </p>
-      )}
+      <CitationDrawer
+        citations={chat.citations}
+        openMarker={openMarker}
+        dict={dict}
+        onClose={() => setOpenMarker(null)}
+      />
     </section>
   );
 }
@@ -136,7 +180,7 @@ function StageIndicator({
             className={[
               "rounded-full border px-2.5 py-1",
               isActive
-                ? "border-accent bg-accent text-accent-contrast font-medium"
+                ? "border-accent bg-accent font-medium text-accent-contrast"
                 : isPast
                   ? "border-border-subtle text-fg-muted"
                   : "border-border-subtle text-fg-muted/60",

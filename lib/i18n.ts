@@ -46,6 +46,23 @@ const es = {
     compare: "Comparando opciones",
     handoff: "Preparando el contacto",
   },
+  /**
+   * Etiquetas legibles de los slots del perfil. Las claves deben coincidir
+   * exactamente con PROFILE_SLOTS de `lib/protocol.ts`: el usuario nunca debe
+   * ver un identificador técnico como `stopping_time`.
+   */
+  slots: {
+    application_type: "Tipo de protección",
+    body_part: "Qué hay que detectar",
+    area_geometry: "Forma y tamaño de la zona",
+    mounting: "Montaje del sensor",
+    environment: "Condiciones del entorno",
+    access_frequency: "Frecuencia de acceso",
+    material_passthrough: "Paso de material",
+    existing_control: "Control de seguridad existente",
+    region: "Región y normativa aplicable",
+    stopping_time: "Tiempo de parada de la máquina",
+  },
   citations: {
     title: "Fuentes",
     empty: "Todavía no hay fuentes citadas en esta conversación.",
@@ -125,6 +142,18 @@ const en: Dictionary = {
     shortlist: "Shortlisting",
     compare: "Comparing options",
     handoff: "Preparing the handover",
+  },
+  slots: {
+    application_type: "Type of protection",
+    body_part: "What must be detected",
+    area_geometry: "Shape and size of the area",
+    mounting: "Sensor mounting",
+    environment: "Environmental conditions",
+    access_frequency: "Access frequency",
+    material_passthrough: "Material pass-through",
+    existing_control: "Existing safety control",
+    region: "Region and applicable standards",
+    stopping_time: "Machine stopping time",
   },
   citations: {
     title: "Sources",

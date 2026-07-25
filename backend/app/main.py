@@ -20,11 +20,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import TypeAdapter, ValidationError
 
+from app.agent.graph import build_runner
 from app.config import Settings, get_settings
-from app.db import NullStore, PostgresStore, Store, open_pool
+from app.db import (
+    NullStore,
+    PostgresStore,
+    Store,
+    open_checkpointer_pool,
+    open_pool,
+)
 from app.protocol import ChatRequest, ErrorEvent, LeadRequest, MessageRequest
 from app.ratelimit import SlidingWindowLimiter, check_session_budget
-from app.runner import AgentRunner, EchoRunner
+from app.runner import AgentRunner
 from app.session import (
     client_key,
     compute_anon_hash,
@@ -49,24 +56,47 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings.log_degradations()
 
     pool = None
+    checkpointer_pool = None
+    checkpointer = None
     store: Store
+
     if settings.persistence_enabled:
         assert settings.database_url is not None
         pool = await open_pool(settings.database_url)
         store = PostgresStore(pool)
         logger.info("persistencia activa contra Postgres")
+
+        # El checkpointer crea sus propias tablas la primera vez (ver
+        # supabase/README.md). Si falla, se degrada a memoria con aviso en lugar
+        # de impedir el arranque: perder reanudación es malo, no arrancar es peor.
+        try:
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+            checkpointer_pool = await open_checkpointer_pool(settings.database_url)
+            saver = AsyncPostgresSaver(checkpointer_pool)  # type: ignore[arg-type]
+            await saver.setup()
+            checkpointer = saver
+            logger.info("checkpointer de LangGraph sobre Postgres")
+        except Exception:
+            logger.exception(
+                "no se pudo inicializar el checkpointer Postgres; se usa memoria"
+            )
+            if checkpointer_pool is not None:
+                await checkpointer_pool.close()
+                checkpointer_pool = None
     else:
         store = NullStore()
 
     app.state.settings = settings
     app.state.store = store
-    # Lote F sustituye EchoRunner por el grafo. Este endpoint no cambia.
-    app.state.runner = EchoRunner()
+    app.state.runner = await build_runner(settings, checkpointer)
     app.state.limiter = SlidingWindowLimiter(max_events=settings.rate_limit_per_minute)
 
     try:
         yield
     finally:
+        if checkpointer_pool is not None:
+            await checkpointer_pool.close()
         if pool is not None:
             await pool.close()
 

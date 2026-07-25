@@ -117,7 +117,7 @@ Convivencia de esquema y propiedad de tablas: ver `supabase/README.md`.
 | Decisión | Elección | Motivo |
 |---|---|---|
 | Fuente de documentación | **Scraping de sick.com** | No hay acceso bulk/API disponible |
-| Alcance del MVP | **Escáneres láser de seguridad** (nanoScan3, microScan3, outdoorScan3) | Un árbol de decisión acotado para validar el pipeline end-to-end |
+| Alcance del MVP | **Las 5 familias que cubre el catálogo entregado**: escáner láser (nanoScan3, microScan3), radar safeRS3, controlador Flexi Compact, cámara 3D safeVisionary2 | Se alinea con el dato real, no con una suposición previa. `outdoorScan3` quedó **excluido** de la extracción; el caso de exterior lo cubre safeRS3, que declara `Indoor / Outdoor` |
 | Destino del lead | **Supabase + notificación** (email/Slack) | Sin dependencia de CRM en el MVP; se aísla detrás de un puerto |
 | Idiomas | **ES + EN**, embeddings multilingües | Documentación fuente en EN/DE, cliente hispanohablante |
 | Vector store | **pgvector en Supabase** | Una sola infraestructura; revisable si el corpus supera ~10⁵ chunks |
@@ -654,11 +654,16 @@ Fase 1 **no depende** del agente y es donde está el riesgo técnico real. Se va
 
 ## 16. Límites conocidos del MVP
 
-- **Una sola familia.** Solo escáneres láser. Un cliente que pregunte por proteger una
-  abertura con cortina óptica no obtendrá respuesta útil: el router lo detecta y deriva a
-  humano en lugar de forzar una recomendación fuera de alcance. Ruta de salida: el esquema y
-  el golden set están diseñados para que añadir cortinas ópticas sea aditivo, no una
-  reescritura.
+- **Sin cortinas ópticas.** El catálogo entregado no incluye ninguna, así que la
+  protección de un punto de operación y la detección de dedos quedan fuera de alcance.
+  El agente lo detecta en `RequirementProfile.out_of_scope_reason()` y deriva a humano
+  en lugar de forzar un escáner láser donde hace falta una cortina. Añadirlas después
+  es aditivo: entra por el mismo puerto de recuperación.
+- **15 de 32 referencias.** Cinco quedan pendientes de extraer y doce se excluyeron a
+  petición (`docs/catalog-handover.md` §6.1 y §6.6). El agente distingue «referencia
+  pendiente» de «referencia desconocida», que no es lo mismo.
+- **Las citas no llevan número de página.** La extracción actual cita la ficha
+  completa. La granularidad de fragmento llegará con el índice documental.
 - **Sin CRM.** El lead vive en Supabase y se notifica; el seguimiento comercial es manual.
 - **Sin cálculo de distancia de seguridad.** Por diseño (§1), no por falta de tiempo.
 - **Documentación dependiente de scraping.** Si cambia la estructura del sitio, la ingesta se

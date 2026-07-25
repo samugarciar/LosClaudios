@@ -315,3 +315,21 @@ async def open_pool(database_url: str) -> AsyncConnectionPool:
     pool = AsyncConnectionPool(database_url, min_size=1, max_size=8, open=False)
     await pool.open(wait=True, timeout=15)
     return pool
+
+
+async def open_checkpointer_pool(database_url: str) -> AsyncConnectionPool:
+    """Pool separado para el checkpointer de LangGraph.
+
+    Va aparte del nuestro a propósito: el checkpointer exige `dict_row`, y
+    nuestro `add_message` lee la fila por posición (`row[0]`). Compartir pool
+    haría que uno de los dos fallara de forma difícil de rastrear.
+    """
+    pool = AsyncConnectionPool(
+        database_url,
+        min_size=1,
+        max_size=4,
+        open=False,
+        kwargs={"row_factory": dict_row, "autocommit": True},
+    )
+    await pool.open(wait=True, timeout=15)
+    return pool

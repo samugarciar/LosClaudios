@@ -20,6 +20,12 @@ next-env.d.ts
 .env.local
 .env.*.local
 
+# python
+# (uv.lock SÍ se versiona: fija las versiones del backend para todo el equipo)
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
 # tests / cobertura
 coverage/
 playwright-report/
@@ -37,6 +43,9 @@ test-results/
 /data/*.json
 sick_datasheets.json
 /supabase/seed/
+# Cierra el hueco de los patrones de arriba: las extracciones con fecha en el
+# nombre viven en data/catalog/ y `/data/*.json` no las alcanza.
+/data/catalog/
 
 # python de la ingesta
 __pycache__/

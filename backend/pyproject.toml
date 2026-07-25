@@ -34,3 +34,5 @@ select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# El paquete `app` vive en la raíz de backend/, no está instalado.
+pythonpath = ["."]

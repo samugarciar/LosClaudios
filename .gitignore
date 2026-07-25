@@ -1,0 +1,42 @@
+# dependencias
+node_modules/
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/releases
+!.yarn/plugins
+
+# build
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+
+# entorno — nunca commitear secretos
+.env
+.env.local
+.env.*.local
+
+# tests / cobertura
+coverage/
+playwright-report/
+test-results/
+/blob-report/
+/playwright/.cache/
+
+# corpus y artefactos de ingesta (documentación de producto, no versionable)
+/data/raw/
+/data/parsed/
+*.pdf
+
+# sistema / editor
+.DS_Store
+Thumbs.db
+*.log
+.vercel
+.idea/
+.vscode/*
+!.vscode/extensions.json

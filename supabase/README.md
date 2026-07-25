@@ -13,10 +13,18 @@ En el SQL Editor del proyecto de Supabase, **en orden numérico**:
 0002_business.sql    recommendations, leads, feedback
 0003_rls.sql         RLS + revocación de privilegios
 0004_retention.sql   función de purga (no se programa sola)
+0100_rag_core.sql    pgvector, documents, chunks, product_specs, ingest_review_queue
+0101_rag_rls.sql     RLS + revocación de las tablas de RAG
 ```
 
 Todos son idempotentes: reaplicarlos no rompe nada. Verificado contra
-PostgreSQL 16.
+PostgreSQL 16. Los `0100+` verificados contra PostgreSQL 17 + pgvector, y
+aplicados sobre los `0001–0004` para comprobar que ambos rangos conviven.
+
+Los datos del catálogo van aparte, en `supabase/seed/`, y **no están
+versionados**: contienen documentación de producto de SICK, mismo estatus legal
+que los PDF que `.gitignore` ya excluía (README raíz §6, revisión de términos
+pendiente). Se regeneran con `python ingest/build_seed.py`.
 
 Después de `0004`, hay que **elegir cómo se programa la purga** (pg_cron o un
 job del backend). Está anotado al final de ese fichero. Una función de purga
@@ -35,10 +43,10 @@ comprueba esta tabla.
 | `recommendations` | plataforma / agente | `0002_business.sql` |
 | `leads` | plataforma / agente | `0002_business.sql` |
 | `feedback` | plataforma / agente | `0002_business.sql` |
-| `documents` | **equipo de RAG** | — (no lo creamos nosotros) |
-| `chunks` | **equipo de RAG** | — |
-| `product_specs` | **equipo de RAG** | — |
-| `ingest_review_queue` | **equipo de RAG** | — |
+| `documents` | **equipo de RAG** | `0100_rag_core.sql` |
+| `chunks` | **equipo de RAG** | `0100_rag_core.sql` |
+| `product_specs` | **equipo de RAG** | `0100_rag_core.sql` |
+| `ingest_review_queue` | **equipo de RAG** | `0100_rag_core.sql` |
 | `checkpoints` | plataforma / agente | **las crea LangGraph** ⚠️ |
 | `checkpoint_blobs` | plataforma / agente | **las crea LangGraph** ⚠️ |
 | `checkpoint_writes` | plataforma / agente | **las crea LangGraph** ⚠️ |
@@ -65,7 +73,7 @@ no sorprenda a nadie ni se borren por parecer basura.
    una. Un `revoke ... on all tables in schema public` tocaría también las
    tablas de RAG y podría romperles el acceso sin aviso.
 5. **`pgvector` no lo habilitamos nosotros.** Si hace falta, va en el rango
-   `0100+` del equipo de RAG.
+   `0100+` del equipo de RAG. — Hecho: lo habilita `0100_rag_core.sql`.
 
 ## Modelo de acceso
 

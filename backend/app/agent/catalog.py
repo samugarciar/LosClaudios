@@ -216,6 +216,51 @@ def parse_resolutions(value: Any) -> tuple[int, ...]:
 
 
 # ---------------------------------------------------------------------------
+# Convenciones de valor del equipo de RAG
+# ---------------------------------------------------------------------------
+# Estas cuatro funciones replican las de `ingest/normalize.py`. No se importan
+# porque `ingest/` vive fuera del paquete del backend. `test_catalog.py` verifica
+# que no divergimos de sus enums: si lo hacen, el filtro fallaría en silencio.
+
+_DEVICE_CATEGORY_BY_FAMILY: dict[str, str] = {
+    "escaner laser de seguridad": "laser_scanner",
+    "controladores de seguridad": "safety_controller",
+    "camara 3d de seguridad": "safety_camera_3d",
+    "sensores de radar seguros": "safety_radar",
+}
+
+
+def device_category_of(family: str) -> str | None:
+    return _DEVICE_CATEGORY_BY_FAMILY.get(_strip_accents(family).strip())
+
+
+def parse_sil_short(value: Any) -> str | None:
+    """`'SIL 2 (IEC 61508)'` → `'SIL 2'`."""
+    if not isinstance(value, str):
+        return None
+    m = re.search(r"SIL\s*(\d)", value, flags=re.IGNORECASE)
+    return f"SIL {m.group(1)}" if m else None
+
+
+def parse_ip_short(rating: IpRating | None) -> str | None:
+    """`IpRating((65, 67))` → `'IP65'`.
+
+    El **menor** de los dos, igual que su ingesta. Es el criterio conservador:
+    prometer IP67 cuando la ficha admite una variante IP65 podría acabar en un
+    equipo montado donde no debe.
+    """
+    return f"IP{rating.worst}" if rating else None
+
+
+def parse_label_int(value: Any, prefix: str) -> int | None:
+    """`'Categoria 3'` → 3 · `'Tipo 2 (IEC 61496-3)'` → 2."""
+    if not isinstance(value, str):
+        return None
+    m = re.search(rf"{prefix}\s*(\d)", value, flags=re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
+# ---------------------------------------------------------------------------
 # Registro
 # ---------------------------------------------------------------------------
 
@@ -271,6 +316,57 @@ class CatalogRecord:
         if not self.environments:
             return None
         return environment in self.environments
+
+    def to_spec_row(self) -> dict[str, Any]:
+        """Fila con los nombres de columna de `product_specs` (rango 0100+).
+
+        Es la pieza que une los dos mundos: emitiendo las claves que espera el
+        motor Structured del equipo de RAG, su `evaluate()` y su `SpecMatch`
+        operan sobre el catálogo en memoria **sin ninguna modificación**. La
+        misma fila sale de SQL en producción y de este JSON en desarrollo.
+        """
+        protective = self.protective_field_m
+        warning = self.warning_field_m
+        response = self.response_time_ms
+        temp = self.operating_temp_c
+        measuring = parse_span(self.raw.get("alcance_medida_m"))
+
+        return {
+            "part_number": self.reference,
+            "family": self.family,
+            "variant": self.variant,
+            "device_category": device_category_of(self.family),
+            "protective_field_min_m": protective.low if protective else None,
+            "protective_field_max_m": protective.high if protective else None,
+            "warning_field_min_m": warning.low if warning else None,
+            "warning_field_max_m": warning.high if warning else None,
+            "measuring_range_max_m": measuring.high if measuring else None,
+            "response_time_min_ms": response.low if response else None,
+            "response_time_max_ms": response.high if response else None,
+            "resolution_mm": list(self.resolutions_mm),
+            "scan_angle_deg": self.scan_angle_deg,
+            "n_fields_max": self.field_sets,
+            "n_monitoring_cases_max": self.monitoring_cases,
+            "pl": self.performance_level,
+            "sil": parse_sil_short(self.sil),
+            "iso13849_category": parse_label_int(self.iso13849_category, "categoria"),
+            "iec61496_type": parse_label_int(self.iec61496_type, "tipo"),
+            "pfhd": self.pfhd,
+            "ip_rating": parse_ip_short(self.ip),
+            # `outdoor` sale a None si la ficha no declara ámbito: su filtro usa
+            # `is not true`, de modo que un None nunca se lee como «vale fuera».
+            "outdoor": (OUTDOOR in self.environments) if self.environments else None,
+            "temp_min_c": temp.low if temp else None,
+            "temp_max_c": temp.high if temp else None,
+            "raw": self.raw,
+            # Procedencia, con los alias que su SELECT da a las columnas de
+            # `documents`, para que `SpecMatch.citation()` funcione igual.
+            "doc_id": self.provenance.reference,
+            "doc_version": self.provenance.doc_version,
+            "doc_title": self.provenance.title,
+            "source_url": self.provenance.source_url,
+            "revision_date": self.provenance.revision_date,
+        }
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -345,35 +441,12 @@ def _build_record(raw: dict[str, Any]) -> CatalogRecord:
 
 
 # ---------------------------------------------------------------------------
-# Consulta
+# Catálogo
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class CatalogQuery:
-    """Restricciones duras. Todo opcional: lo que no se fija, no filtra."""
-
-    families: frozenset[str] | None = None
-    min_protective_field_m: float | None = None
-    max_resolution_mm: int | None = None
-    min_ip: int | None = None
-    environment: str | None = None
-    min_pl_rank: int | None = None
-    exclude_system_parts: frozenset[str] | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class SearchResult:
-    """Tres cubos, y el del medio es el que evita mentir.
-
-    `indeterminate` son registros que **podrían** valer pero cuya ficha no trae
-    el dato para confirmarlo (§5.1). Meterlos en `rejected` sería afirmar que no
-    cumplen; meterlos en `matched`, que sí.
-    """
-
-    matched: tuple[CatalogRecord, ...]
-    indeterminate: tuple[tuple[CatalogRecord, str], ...]
-    rejected_count: int
+# El filtrado NO vive aquí. Lo hace el motor Structured del equipo de RAG
+# (`app.retrieval.structured`), que aplica los mismos criterios sobre SQL y
+# sobre memoria. Duplicar la lógica de filtro era garantizar que un día
+# divergieran y nadie se enterase.
 
 
 class Catalog:
@@ -428,94 +501,25 @@ class Catalog:
     def is_pending(self, reference: str) -> bool:
         return str(reference) in self._pending
 
+    def reference_status(self, reference: str) -> str:
+        """`known` · `pending` · `unknown`. Son tres cosas distintas (§6.1).
+
+        «Pendiente de extraer» significa que la referencia existe y no tenemos su
+        ficha; «desconocida» significa que no sabemos ni que exista. Colapsarlas
+        haría que el agente respondiera lo mismo a dos preguntas muy distintas.
+        """
+        key = str(reference)
+        if key in self._records:
+            return "known"
+        if key in self._pending:
+            return "pending"
+        return "unknown"
+
     def families(self) -> dict[str, int]:
         counts: dict[str, int] = {}
         for record in self._records.values():
             counts[record.family] = counts.get(record.family, 0) + 1
         return counts
-
-    # --- búsqueda ----------------------------------------------------------
-    def search(self, query: CatalogQuery) -> SearchResult:
-        matched: list[CatalogRecord] = []
-        indeterminate: list[tuple[CatalogRecord, str]] = []
-        rejected = 0
-
-        for record in self._records.values():
-            verdict, reason = self._evaluate(record, query)
-            if verdict is True:
-                matched.append(record)
-            elif verdict is None:
-                indeterminate.append((record, reason or "dato ausente en la ficha"))
-            else:
-                rejected += 1
-
-        matched.sort(key=_relevance_key, reverse=True)
-        return SearchResult(
-            matched=tuple(matched),
-            indeterminate=tuple(indeterminate),
-            rejected_count=rejected,
-        )
-
-    @staticmethod
-    def _evaluate(
-        record: CatalogRecord, query: CatalogQuery
-    ) -> tuple[bool | None, str | None]:
-        """True cumple · False no cumple · None la ficha no lo dice."""
-        if query.families is not None and _strip_accents(record.family) not in {
-            _strip_accents(f) for f in query.families
-        }:
-            return False, None
-
-        if (
-            query.exclude_system_parts
-            and record.system_part
-            and record.system_part.lower()
-            in {p.lower() for p in query.exclude_system_parts}
-        ):
-            return False, None
-
-        if query.min_pl_rank is not None:
-            if record.pl_rank is None:
-                return None, "la ficha no indica nivel de prestaciones"
-            if record.pl_rank < query.min_pl_rank:
-                return False, None
-
-        if query.min_protective_field_m is not None:
-            span = record.protective_field_m
-            if span is None:
-                return None, "la ficha no indica campo de protección"
-            if span.high < query.min_protective_field_m:
-                return False, None
-
-        if query.max_resolution_mm is not None:
-            if not record.resolutions_mm:
-                return None, "la ficha no indica capacidad de detección"
-            if min(record.resolutions_mm) > query.max_resolution_mm:
-                return False, None
-
-        if query.min_ip is not None:
-            if record.ip is None:
-                return None, "la ficha no indica grado de protección IP"
-            if record.ip.best < query.min_ip:
-                return False, None
-
-        if query.environment is not None:
-            supported = record.supports(query.environment)
-            if supported is None:
-                return None, "la ficha no indica ámbito de uso"
-            if not supported:
-                return False, None
-
-        return True, None
-
-
-def _relevance_key(record: CatalogRecord) -> tuple[int, float, int]:
-    """Orden estable: primero mayor PL, luego más alcance, luego más campos."""
-    return (
-        record.pl_rank or 0,
-        record.protective_field_m.high if record.protective_field_m else 0.0,
-        record.field_sets or 0,
-    )
 
 
 def default_catalog_path() -> Path:

@@ -15,11 +15,15 @@ from app.agent.catalog import (
     INDOOR,
     OUTDOOR,
     Catalog,
-    CatalogQuery,
     default_catalog_path,
+    device_category_of,
+    parse_ip_short,
     parse_pfhd,
+    parse_sil_short,
 )
-from app.agent.retrieval import CatalogRetriever, RetrievalSpec
+from app.agent.shortlist import build_candidates
+from app.retrieval.catalog import CatalogRetriever
+from app.retrieval.structured import DEVICE_CATEGORIES, IP_RATINGS, PL_ORDER, SIL_ORDER, evaluate
 
 # El corpus NO está versionado: es documentación de SICK con revisión de términos
 # pendiente (ver .gitignore y docs/catalog-handover.md). Sin él estos tests se
@@ -51,7 +55,7 @@ def catalog() -> Catalog:
 
 @pytest.fixture
 def retriever(catalog: Catalog) -> CatalogRetriever:
-    return CatalogRetriever(catalog, today=date(2026, 7, 25))
+    return CatalogRetriever(catalog)
 
 
 # ---------------------------------------------------------------------------
@@ -73,15 +77,10 @@ def test_una_pendiente_no_se_puede_consultar(catalog: Catalog, reference: str) -
     assert catalog.is_pending(reference) is True
 
 
-async def test_describe_distingue_pendiente_de_desconocida(
-    retriever: CatalogRetriever,
-) -> None:
-    pendiente = await retriever.describe("1094455")
-    assert pendiente.candidates == []
-    assert "pendiente" in pendiente.indeterminate[0][1]
-
-    desconocida = await retriever.describe("0000000")
-    assert "desconocida" in desconocida.indeterminate[0][1]
+def test_pendiente_y_desconocida_son_estados_distintos(catalog: Catalog) -> None:
+    assert catalog.reference_status("1091037") == "known"
+    assert catalog.reference_status("1094455") == "pending"
+    assert catalog.reference_status("0000000") == "unknown"
 
 
 def test_no_se_confunde_1110035_con_1110034(catalog: Catalog) -> None:
@@ -118,13 +117,19 @@ def test_pfhd_en_prosa_no_devuelve_numero() -> None:
     assert raw is not None
 
 
-def test_filtro_sin_dato_es_indeterminado_no_descartado(catalog: Catalog) -> None:
-    """Los controladores no tienen campo de protección: no es que no cumplan."""
-    result = catalog.search(CatalogQuery(min_protective_field_m=3.0))
-    indeterminadas = {record.reference for record, _ in result.indeterminate}
-    assert "1085349" in indeterminadas  # Flexi Compact, un controlador
-    razones = {reason for _, reason in result.indeterminate}
-    assert any("campo de protección" in reason for reason in razones)
+def test_dato_ausente_es_desconocido_no_fallo(catalog: Catalog) -> None:
+    """Un controlador no tiene campo de protección: no es que no cumpla."""
+    controlador = catalog.get("1085349")  # Flexi Compact
+    assert controlador is not None
+    checks = evaluate(controlador.to_spec_row(), {"protective_field_min_m": 3.0})
+    assert [c["resultado"] for c in checks] == ["desconocido"]
+
+
+def test_dato_presente_que_no_llega_es_fallo(catalog: Catalog) -> None:
+    escaner = catalog.get("1100333")  # nanoScan3, 3 m
+    assert escaner is not None
+    checks = evaluate(escaner.to_spec_row(), {"protective_field_min_m": 4.0})
+    assert [c["resultado"] for c in checks] == ["fail"]
 
 
 # ---------------------------------------------------------------------------
@@ -226,8 +231,9 @@ def test_revision_antigua_expone_su_advertencia(catalog: Catalog) -> None:
 
 
 async def test_la_advertencia_llega_a_las_contras(retriever: CatalogRetriever) -> None:
-    result = await retriever.describe(OLD_REVISION)
-    assert any("aviso sobre la fuente" in c.lower() for c in result.candidates[0].cons)
+    matches = await retriever.explain_candidates([OLD_REVISION], {})
+    candidates, _ = build_candidates(matches)
+    assert any("aviso sobre la fuente" in c.lower() for c in candidates[0].cons)
 
 
 def test_referencia_en_dos_productos_es_un_solo_registro(catalog: Catalog) -> None:
@@ -252,9 +258,9 @@ def test_doc_version_se_deriva_de_la_fecha_de_revision(catalog: Catalog) -> None
 
 
 async def test_toda_cita_lleva_version_y_url(retriever: CatalogRetriever) -> None:
-    result = await retriever.search(RetrievalSpec())
-    assert result.citations
-    for citation in result.citations:
+    _, citations = build_candidates(await retriever.search_specs({}))
+    assert citations
+    for citation in citations:
         assert citation.doc_version > 0
         assert citation.source_url.startswith("http")
         # La extracción actual no trae página: se cita la ficha completa.
@@ -263,10 +269,53 @@ async def test_toda_cita_lleva_version_y_url(retriever: CatalogRetriever) -> Non
 
 async def test_todo_candidato_expone_contras(retriever: CatalogRetriever) -> None:
     """Un shortlist sin contras sería un catálogo, no un asesoramiento."""
-    from app.agent.retrieval import RetrievalSpec
-
-    result = await retriever.search(RetrievalSpec())
-    assert result.candidates
-    for candidate in result.candidates:
+    candidates, _ = build_candidates(await retriever.search_specs({}))
+    assert candidates
+    for candidate in candidates:
         assert candidate.cons, f"{candidate.part_number} sin contras"
         assert any("distancia de montaje" in c for c in candidate.cons)
+
+
+# ---------------------------------------------------------------------------
+# Convenciones compartidas con el motor Structured del equipo de RAG
+# ---------------------------------------------------------------------------
+# Nuestro cargador emite las filas que consume SU motor. Si divergimos de sus
+# enums, el filtro no falla: simplemente deja de encontrar producto. Estos tests
+# convierten esa divergencia silenciosa en un fallo de CI.
+
+
+def test_toda_familia_mapea_a_una_device_category_suya(catalog: Catalog) -> None:
+    for record in catalog.records:
+        categoria = device_category_of(record.family)
+        assert categoria in DEVICE_CATEGORIES, (
+            f"{record.family!r} no mapea a ninguna device_category conocida"
+        )
+
+
+def test_los_valores_de_ip_estan_en_su_enum(catalog: Catalog) -> None:
+    for record in catalog.records:
+        assert parse_ip_short(record.ip) in IP_RATINGS
+
+
+def test_los_valores_de_pl_y_sil_estan_en_su_orden(catalog: Catalog) -> None:
+    for record in catalog.records:
+        assert record.performance_level in PL_ORDER
+        assert parse_sil_short(record.sil) in SIL_ORDER
+
+
+def test_el_ip_publicado_es_el_menor_de_los_dos(catalog: Catalog) -> None:
+    """Su ingesta toma el menor: prometer IP67 con una variante IP65 es peligroso."""
+    record = catalog.get(SAFE_VISIONARY)
+    assert record is not None
+    assert record.ip is not None
+    assert record.ip.values == (65, 67)
+    assert parse_ip_short(record.ip) == "IP65"
+
+
+async def test_el_filtro_invalido_revienta_en_vez_de_devolverlo_todo(
+    retriever: CatalogRetriever,
+) -> None:
+    from app.retrieval.structured import FilterError
+
+    with pytest.raises(FilterError):
+        await retriever.search_specs({"campo_inventado": 3})

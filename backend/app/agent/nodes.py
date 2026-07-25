@@ -25,7 +25,7 @@ from app.agent.prompts import (
     SLOT_PRIORITY,
     chips_for,
 )
-from app.agent.retrieval import RetrievalPort
+from app.agent.shortlist import MAX_CANDIDATES, build_candidates, describe_rejections
 from app.agent.state import AdvisorState, profile_of
 from app.protocol import (
     CandidatesEvent,
@@ -36,6 +36,8 @@ from app.protocol import (
     StageEvent,
     TokenEvent,
 )
+from app.retrieval.engine import Retriever, SpecMatch
+from app.retrieval.structured import FilterError, evaluate
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +90,7 @@ def verify_guardrails(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def make_nodes(model: ModelPort, retriever: RetrievalPort) -> dict[str, Any]:
+def make_nodes(model: ModelPort, retriever: Retriever) -> dict[str, Any]:
     """Construye los nodos con sus dependencias inyectadas."""
 
     async def guard_input(state: AdvisorState) -> dict[str, Any]:
@@ -152,15 +154,31 @@ def make_nodes(model: ModelPort, retriever: RetrievalPort) -> dict[str, Any]:
         writer(StageEvent(stage="shortlist"))
 
         profile = profile_of(state)
-        result = await retriever.search(profile.to_retrieval_spec())
+        filters = profile.to_filters()
 
-        if result.citations:
-            writer(CitationsEvent(citations=result.citations))
+        try:
+            matches = await retriever.search_specs(filters, limit=20)
+        except FilterError:
+            # Un filtro inválido es un fallo nuestro, no del cliente. Se
+            # registra y se sigue sin candidatos en vez de devolver el catálogo
+            # entero como si fuera una respuesta.
+            logger.exception("filtros inválidos para el motor Structured: %s", filters)
+            matches = []
+
+        rejected: list[str] = []
+        if len(matches) < MAX_CANDIDATES:
+            # Solo cuando hay hueco en el shortlist se paga una segunda consulta
+            # para poder explicar qué quedó fuera y por qué.
+            rejected = await _explain_rejections(retriever, filters, matches)
+
+        candidates, citations = build_candidates(matches)
+        if citations:
+            writer(CitationsEvent(citations=citations))
 
         return {
-            "candidates": [c.model_dump(by_alias=True) for c in result.candidates],
-            "citations": [c.model_dump(by_alias=True) for c in result.citations],
-            "indeterminate": result.indeterminate,
+            "candidates": [c.model_dump(by_alias=True) for c in candidates],
+            "citations": [c.model_dump(by_alias=True) for c in citations],
+            "rejected": rejected,
         }
 
     async def shortlist(state: AdvisorState) -> dict[str, Any]:
@@ -190,7 +208,7 @@ def make_nodes(model: ModelPort, retriever: RetrievalPort) -> dict[str, Any]:
                 writer(TokenEvent(text=chunk))
             return {"handoff_reason": "out_of_scope"}
 
-        context = _render_context(raw, citations, state.get("indeterminate") or [])
+        context = _render_context(raw, citations, state.get("rejected") or [])
         collected: list[str] = []
         async for chunk in model.stream(
             instruction=EXPLAIN_INSTRUCTION,
@@ -280,10 +298,40 @@ def _consent_version() -> str:
     return os.environ.get("CONSENT_TEXT_VERSION", "2026-07-25.v1")
 
 
+async def _explain_rejections(
+    retriever: Retriever, filters: dict[str, Any], matched: list[SpecMatch]
+) -> list[str]:
+    """Por qué quedaron fuera las referencias que no pasaron el filtro.
+
+    Se pide el catálogo sin filtros y se evalúa cada fila con el mismo
+    `evaluate()` que usa el motor. Así el agente puede decir «el nanoScan3 no
+    llega: 3 m frente a los 4 que necesitas» en lugar de callarse el descarte,
+    que es lo que hace que un shortlist parezca arbitrario.
+    """
+    try:
+        universe = await retriever.search_specs({}, limit=50)
+    except FilterError:  # pragma: no cover — {} siempre es válido
+        return []
+
+    chosen = {match.part_number for match in matched}
+    others = [
+        SpecMatch(
+            part_number=match.part_number,
+            family=match.family,
+            variant=match.variant,
+            row=match.row,
+            checks=evaluate(match.row, filters),
+        )
+        for match in universe
+        if match.part_number not in chosen
+    ]
+    return describe_rejections(others)
+
+
 def _render_context(
     candidates: list[dict[str, Any]],
     citations: list[dict[str, Any]],
-    indeterminate: list[tuple[str, str]],
+    rejected: list[str],
 ) -> str:
     """Contexto recuperado, en texto, para el turno de explicación.
 
@@ -308,10 +356,9 @@ def _render_context(
         for con in candidate.get("cons", []):
             lines.append(f"    vigilar: {con}")
 
-    if indeterminate:
-        lines.append("\nREFERENCIAS QUE NO SE PUEDEN CONFIRMAR CON SU FICHA:")
-        for reference, reason in indeterminate[:5]:
-            lines.append(f"    {reference}: {reason}")
+    if rejected:
+        lines.append("\nREFERENCIAS DESCARTADAS Y POR QUÉ (puedes mencionarlo):")
+        lines.extend(f"    {line}" for line in rejected[:5])
 
     return "\n".join(lines)
 

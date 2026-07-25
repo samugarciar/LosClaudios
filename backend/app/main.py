@@ -29,6 +29,7 @@ from app.db import (
     open_checkpointer_pool,
     open_pool,
 )
+from app.leads import LeadNotifier, build_notifier
 from app.protocol import ChatRequest, ErrorEvent, LeadRequest, MessageRequest
 from app.ratelimit import SlidingWindowLimiter, check_session_budget
 from app.runner import AgentRunner
@@ -89,8 +90,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     app.state.settings = settings
     app.state.store = store
-    app.state.runner = await build_runner(settings, checkpointer)
+    app.state.runner = await build_runner(settings, checkpointer, pool)
     app.state.limiter = SlidingWindowLimiter(max_events=settings.rate_limit_per_minute)
+    app.state.notifier = build_notifier()
 
     try:
         yield
@@ -129,6 +131,7 @@ async def chat(request: Request) -> Response:
     store: Store = app.state.store
     runner: AgentRunner = app.state.runner
     limiter: SlidingWindowLimiter = app.state.limiter
+    notifier: LeadNotifier = app.state.notifier
 
     # --- Validación del cuerpo contra el contrato ---------------------------
     try:
@@ -181,6 +184,19 @@ async def chat(request: Request) -> Response:
     if isinstance(payload, MessageRequest):
         await store.add_message(session_id, "user", payload.text)
 
+    if isinstance(payload, LeadRequest):
+        # El lead se persiste y notifica ANTES de streamear el acuse, no después.
+        # Si el usuario cierra la pestaña mientras llega la confirmación, la
+        # rama de desconexión aborta el turno — y perder unos tokens es
+        # irrelevante, perder el lead que acaba de dejar sus datos no lo es.
+        #
+        # Pendiente: `handoff_summary` debería llevar el resumen del turno
+        # anterior (perfil + candidatos), que vive en el estado del grafo. Hoy
+        # va con lo mínimo; enriquecerlo requiere leer el checkpointer.
+        summary = {"reason": "lead_submitted"}
+        await store.add_lead(session_id, payload.lead, summary)
+        await notifier.notify(payload.lead, summary)
+
     stream = _stream_turn(
         runner=runner,
         store=store,
@@ -209,7 +225,6 @@ async def _stream_turn(
     assistant_text: list[str] = []
     citations: list[Any] = []
     candidates: list[Any] = []
-    handoff: Any = None
 
     try:
         async for event in runner.run(session_id, payload):
@@ -225,8 +240,6 @@ async def _stream_turn(
                     citations = event.citations
                 case "candidates":
                     candidates = event.candidates
-                case "handoff_request":
-                    handoff = event.request
                 case "stage":
                     await store.set_stage(session_id, event.stage)
 
@@ -261,12 +274,7 @@ async def _stream_turn(
             await store.add_citations(message_id, citations)
         if candidates:
             await store.add_recommendations(session_id, candidates, {})
-        if isinstance(payload, LeadRequest):
-            await store.add_lead(
-                session_id,
-                payload.lead,
-                handoff.model_dump(by_alias=True) if handoff is not None else {},
-            )
+        # El lead ya se persistió y notificó antes de abrir el stream.
         # Sin telemetría real de tokens todavía: el lote F la aporta.
         await store.bump_usage(session_id, 0)
     except Exception:

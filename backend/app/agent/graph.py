@@ -21,7 +21,6 @@ from langgraph.graph import END, StateGraph
 
 from app.agent.model import ModelPort, build_model
 from app.agent.nodes import make_nodes
-from app.agent.retrieval import RetrievalPort, build_default_retriever
 from app.agent.state import AdvisorState, profile_of
 from app.config import Settings
 from app.protocol import (
@@ -33,6 +32,7 @@ from app.protocol import (
     StageEvent,
     TokenEvent,
 )
+from app.retrieval.engine import NullRetriever, PostgresRetriever, Retriever
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ def _after_extract(state: AdvisorState) -> str:
 
 def build_graph(
     model: ModelPort,
-    retriever: RetrievalPort,
+    retriever: Retriever,
     checkpointer: Any | None = None,
 ) -> Any:
     nodes = make_nodes(model, retriever)
@@ -160,26 +160,48 @@ class GraphRunner:
         yield DoneEvent(message_id=str(uuid.uuid4()))
 
 
-async def build_runner(settings: Settings, checkpointer: Any | None = None) -> GraphRunner:
+def build_retriever(pool: Any | None) -> Retriever:
+    """Elige recuperador en tres escalones, y deja constancia de cuál.
+
+    1. Postgres, si hay base de datos: es el camino de producción y el único
+       que ve el catálogo completo tras la ingesta.
+    2. Catálogo local, si está el JSON: da recomendaciones reales sin
+       infraestructura. Es lo que permite demostrar el MVP hoy.
+    3. Nada: responde vacío, pero lo grita. Cero candidatos NO es «no hay
+       producto que cumpla».
+    """
+    if pool is not None:
+        logger.info("recuperación: PostgresRetriever (product_specs)")
+        return PostgresRetriever(pool)
+
+    try:
+        from app.agent.catalog import Catalog
+        from app.retrieval.catalog import CatalogRetriever
+
+        retriever = CatalogRetriever(Catalog.default())
+        logger.warning(
+            "recuperación: CatalogRetriever sobre el JSON local. Solo ve las "
+            "fichas extraídas, no el catálogo completo."
+        )
+        return retriever
+    except FileNotFoundError:
+        logger.error(
+            "SIN CATÁLOGO y sin base de datos: el agente no podrá proponer "
+            "producto. Ver docs/catalog-handover.md."
+        )
+        return NullRetriever()
+
+
+async def build_runner(
+    settings: Settings,
+    checkpointer: Any | None = None,
+    pool: Any | None = None,
+) -> GraphRunner:
     """Construye el runner con las dependencias que haya disponibles."""
     model = build_model(
         settings.anthropic_api_key, model=settings.model, effort=settings.effort
     )
-
-    try:
-        retriever = build_default_retriever()
-    except FileNotFoundError:
-        # El corpus no está versionado (revisión de términos pendiente). Sin él
-        # el agente conversa pero no encuentra nada y todo acaba en handoff:
-        # degradado, pero honesto. Arrancar es preferible a no arrancar.
-        from app.agent.catalog import Catalog
-        from app.agent.retrieval import CatalogRetriever
-
-        logger.error(
-            "SIN CATÁLOGO en data/catalog/: el agente no podrá proponer producto. "
-            "Ver docs/catalog-handover.md para obtener la extracción."
-        )
-        retriever = CatalogRetriever(Catalog({"meta": {}, "registros": [], "pendientes": {}}))
+    retriever = build_retriever(pool)
 
     if checkpointer is None:
         logger.warning(

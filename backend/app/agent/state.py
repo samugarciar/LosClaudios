@@ -21,8 +21,6 @@ from typing import Annotated, Any, Literal, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.agent.catalog import INDOOR, OUTDOOR
-from app.agent.retrieval import RetrievalSpec
 from app.protocol import PROFILE_SLOTS, Locale, Slot, Stage
 
 ApplicationType = Literal["area", "access", "point_of_operation"]
@@ -127,30 +125,38 @@ class RequirementProfile(BaseModel):
             )
         )
 
-    def to_retrieval_spec(self) -> RetrievalSpec:
-        environment: str | None = None
-        min_ip: int | None = None
+    def to_filters(self) -> dict[str, Any]:
+        """Filtros para el motor Structured (`app.retrieval.structured`).
+
+        Las claves y los valores son los suyos: `ip_rating_in` con grados de
+        `IP_RATINGS`, `outdoor` booleano, `resolution_max_mm` numérico. Emitir
+        una clave que no exista lanza `FilterError` a propósito — un filtro
+        inventado debe romper, no degradarse a una búsqueda sin condiciones que
+        devolvería el catálogo entero como si fuera respuesta.
+
+        Solo se emite lo que el cliente ha dicho: un filtro de más descarta
+        producto por un requisito que nadie ha pedido.
+        """
+        filters: dict[str, Any] = {}
+
+        if self.protected_distance_m is not None:
+            filters["protective_field_min_m"] = self.protected_distance_m
+
+        if self.body_part and (mm := _MAX_RESOLUTION_MM.get(self.body_part)):
+            filters["resolution_max_mm"] = mm
+
         if self.environment == "outdoor":
-            environment = OUTDOOR
-            # Intemperie: no basta con que la ficha lo declare, el IP importa.
-            min_ip = 65
-        elif self.environment in ("indoor_clean", "indoor_dusty"):
-            environment = INDOOR
-            if self.environment == "indoor_dusty":
-                min_ip = 65
+            filters["outdoor"] = True
+            # A la intemperie no basta con que la ficha declare uso exterior:
+            # el grado de protección tiene que acompañar.
+            filters["ip_rating_in"] = ["IP65", "IP66", "IP67", "IP69K"]
+        elif self.environment == "indoor_dusty":
+            filters["ip_rating_in"] = ["IP65", "IP66", "IP67", "IP69K"]
+        elif self.environment == "indoor_clean":
+            # Sin filtro de IP: en interior limpio un IP20 de armario es válido.
+            pass
 
-        max_resolution = (
-            _MAX_RESOLUTION_MM.get(self.body_part) if self.body_part else None
-        )
-
-        return RetrievalSpec(
-            families=None,
-            min_protective_field_m=self.protected_distance_m,
-            max_resolution_mm=max_resolution,
-            min_ip=min_ip,
-            environment=environment,
-            min_pl_rank=None,
-        )
+        return filters
 
 
 class Turn(TypedDict):
@@ -172,7 +178,8 @@ class AdvisorState(TypedDict, total=False):
     stage: Stage
     candidates: list[dict[str, Any]]
     citations: list[dict[str, Any]]
-    indeterminate: list[tuple[str, str]]
+    #: Frases de descarte de las referencias que no pasaron el filtro.
+    rejected: list[str]
     handoff_reason: str | None
     out_of_scope: str | None
     blocked: str | None

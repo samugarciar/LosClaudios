@@ -15,8 +15,8 @@ from app.agent.catalog import Catalog, default_catalog_path
 from app.agent.graph import GraphRunner, build_graph
 from app.agent.model import ScriptedModel
 from app.agent.nodes import verify_guardrails
-from app.agent.retrieval import CatalogRetriever
 from app.protocol import MessageRequest
+from app.retrieval.catalog import CatalogRetriever
 
 # El corpus no está versionado (ver .gitignore). Las pruebas de guardrails no
 # dependen de él, así que solo se salta lo que recorre el grafo.

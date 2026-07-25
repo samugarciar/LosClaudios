@@ -23,6 +23,16 @@ import { mockLeadAck, mockTurn, type MockStep } from "@/lib/mock/scenario";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/**
+ * Un turno con pensamiento adaptativo tarda entre 20 y 60 segundos. El límite
+ * por defecto de una función en Vercel es de 10 s en el plan Hobby, así que sin
+ * esto el stream se corta a mitad de respuesta y el usuario ve un mensaje
+ * truncado sin ningún error.
+ *
+ * 60 es el máximo de Hobby. En Pro se puede subir hasta 300.
+ */
+export const maxDuration = 60;
+
 const TURN_COOKIE = "sa_mock_turn";
 
 const SSE_HEADERS: Record<string, string> = {

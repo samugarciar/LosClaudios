@@ -90,6 +90,24 @@ flowchart TB
     GRAPH -.->|"handoff"| NOTIF["email / Slack comercial"]
 ```
 
+### Layout del repositorio
+
+Un solo repositorio, dos equipos. El frontend Next vive en la raíz; el backend
+Python en `backend/`. El equipo de RAG añade su propio directorio hermano.
+
+```
+├── app/ · components/ · lib/     frontend Next.js          (plataforma)
+├── backend/                      FastAPI + LangGraph       (plataforma)
+├── supabase/schema/              SQL numerado 0001–0099    (plataforma)
+│                                 SQL numerado 0100+        (RAG)
+└── <ingesta / rag>               por definir               (RAG)
+```
+
+`lib/protocol.ts` y `backend/app/protocol.py` son el mismo contrato en dos
+lenguajes. Un test de paridad falla en CI si divergen.
+
+Convivencia de esquema y propiedad de tablas: ver `supabase/README.md`.
+
 ---
 
 ## 3. Decisiones
@@ -374,17 +392,22 @@ protegida o número de haces en cortinas ópticas) entran como columnas nullable
 
 ```sql
 -- Sesión y conversación -------------------------------------------------
+-- Implementación aplicada: supabase/schema/0001_core.sql (fuente de verdad)
 create table sessions (
   id           uuid primary key default gen_random_uuid(),
   anon_hash    text not null,              -- hash con sal de IP+UA, nunca IP en claro
   locale       text not null default 'es',
   stage        text not null default 'discovery',
-  lead_id      uuid references leads(id),
   referrer     text,
   utm          jsonb,
+  turn_count   integer not null default 0, -- topes de abuso, sobreviven al reinicio
+  tokens_used  integer not null default 0,
   created_at   timestamptz not null default now(),
   last_seen    timestamptz not null default now()
 );
+-- Nota: NO hay sessions.lead_id. Junto a leads.session_id formaría una FK
+-- circular que no se puede crear en un solo paso. Se consulta por
+-- leads.session_id.
 
 create table messages (
   id            bigserial primary key,
@@ -425,13 +448,16 @@ create table recommendations (
 
 create table leads (
   id                    uuid primary key default gen_random_uuid(),
-  session_id            uuid not null references sessions(id),
-  name                  text,
-  email                 text,
+  -- NULLABLE + ON DELETE SET NULL: el lead debe sobrevivir a la purga de
+  -- retención. Si cascadease, borraríamos leads que comercial está trabajando.
+  session_id            uuid references sessions(id) on delete set null,
+  name                  text not null,
+  email                 text not null,
   company               text,
   country               text,
   consent_at            timestamptz not null,
   consent_text_version  text not null,     -- qué texto legal aceptó exactamente
+  handoff_summary       jsonb not null,    -- contexto desnormalizado: lead autocontenido
   notified_at           timestamptz
 );
 
